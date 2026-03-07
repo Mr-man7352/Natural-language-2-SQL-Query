@@ -1,8 +1,10 @@
 import tarfile
 import requests
 import json
+import time
 from transformers import T5Tokenizer
 from torch.utils.data import Dataset
+from transformers import T5ForConditionalGeneration, Trainer, TrainingArguments, TrainerCallback
 import torch
 
 
@@ -120,6 +122,59 @@ class SQLDataset(Dataset):
             "labels": tokens["labels"]
         }
 
+class TimingCallback(TrainerCallback):
+    def __init__(self):
+        self.train_start = None
+        self.epoch_start = None
+        self.step_times = []
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        self.train_start = time.time()
+        total_steps = state.max_steps
+        print(f"\n{'='*55}")
+        print(f"  Training started — Total steps: {total_steps}")
+        print(f"{'='*55}\n")
+
+    def on_epoch_begin(self, args, state, control, **kwargs):
+        self.epoch_start = time.time()
+        epoch = int(state.epoch or 0) + 1
+        print(f"\n── Epoch {epoch} started ──")
+
+    def on_step_end(self, args, state, control, **kwargs):
+        # Record time every 10 steps and print a progress line
+        if state.global_step % 10 == 0 and state.global_step > 0:
+            elapsed = time.time() - self.train_start
+            steps_done = state.global_step
+            total_steps = state.max_steps
+            steps_left = total_steps - steps_done
+            avg_sec_per_step = elapsed / steps_done
+            eta_sec = avg_sec_per_step * steps_left
+
+            elapsed_str = time.strftime("%H:%M:%S", time.gmtime(elapsed))
+            eta_str     = time.strftime("%H:%M:%S", time.gmtime(eta_sec))
+            pct         = 100 * steps_done / total_steps
+
+            print(
+                f"  Step {steps_done:>4}/{total_steps} "
+                f"({pct:5.1f}%) | "
+                f"Elapsed: {elapsed_str} | "
+                f"ETA: {eta_str}"
+            )
+
+    def on_epoch_end(self, args, state, control, **kwargs):
+        epoch_elapsed = time.time() - self.epoch_start
+        total_elapsed = time.time() - self.train_start
+        epoch = int(state.epoch or 0)
+        print(f"\n── Epoch {epoch} done in {epoch_elapsed:.1f}s "
+              f"(total: {total_elapsed:.1f}s) ──\n")
+
+    def on_train_end(self, args, state, control, **kwargs):
+        total = time.time() - self.train_start
+        total_str = time.strftime("%H:%M:%S", time.gmtime(total))
+        print(f"\n{'='*55}")
+        print(f"  Training complete!  Total time: {total_str}")
+        print(f"{'='*55}\n")
+
    
 def main():
 
@@ -148,6 +203,33 @@ def main():
     tokenizer= T5Tokenizer.from_pretrained("t5-small")
     tokenized_data= SQLDataset(training_pairs,tokenizer)
     print("\nSAMPLE TOKENIZED EXAMPLE:\n", tokenized_data[0])
+
+    # Fine-tuning T5 for SQL generation
+    model = T5ForConditionalGeneration.from_pretrained('t5-small')
+
+    args= TrainingArguments(
+        output_dir= './sql_model',
+        learning_rate= 3e-4,
+        per_device_train_batch_size=16,
+        num_train_epochs=2,
+        save_steps=50,
+        disable_tqdm=True,
+        logging_steps=50,  
+        # ✅ Fix for XLA/TPU device — disable fused optimizer
+        optim="adamw_torch",          # explicitly use standard AdamW
+        no_cuda=False,                # let it use whatever accelerator is available
+    )
+
+    trainer= Trainer(
+        model=model,
+        args=args,
+        train_dataset= tokenized_data,
+        callbacks=[TimingCallback()]
+    )
+
+    trainer.train()
+    trainer.save_model("./sql_model")
+    tokenizer.save_pretrained("./sql_model")
 
     print("end of main")
 
