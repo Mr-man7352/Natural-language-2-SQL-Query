@@ -6,7 +6,7 @@ from transformers import T5Tokenizer
 from torch.utils.data import Dataset
 from transformers import T5ForConditionalGeneration, Trainer, TrainingArguments, TrainerCallback
 import torch
-
+import sqlparse
 
 def download_and_extract():
     """Download the WikiSQL dataset archive and extract it locally."""
@@ -175,11 +175,36 @@ class TimingCallback(TrainerCallback):
         print(f"  Training complete!  Total time: {total_str}")
         print(f"{'='*55}\n")
 
+def is_valid_sql(sql):
+    return bool(sqlparse.parse(sql))
+
+def generate_sql(tokenizer,model,schema,device, question, max_length=128) :
+    input_text = f"Schema: {schema}, Question: {question}"
+
+    inputs = tokenizer(
+        input_text,
+        return_tensors="pt",
+        truncation=True,
+        padding=True
+    ).to(device)
+
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_length=max_length,
+            num_beams=4,
+            no_repeat_ngram_size=3,
+            early_stopping=True
+        )
+
+    sql = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    return sql
+
    
 def main():
 
     # Entry point: trigger dataset download and extraction.
-    # download_and_extract()
+    download_and_extract()
 
     with open("data/train.jsonl") as f:
         sample = json.loads(next(f))
@@ -230,6 +255,30 @@ def main():
     trainer.train()
     trainer.save_model("./sql_model")
     tokenizer.save_pretrained("./sql_model")
+
+    tokenizer = T5Tokenizer.from_pretrained("./sql_model")
+    model = T5ForConditionalGeneration.from_pretrained("./sql_model")
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model.to(device)
+
+    model.eval()
+
+    userwish = input("Enter your question (or 'exit' to quit): ")
+
+    while userwish.lower() != "exit":
+
+        schema = input("Enter the table schema (e.g., 'name(str), age(int), salary(float)'): ")
+        generated_sql = generate_sql(tokenizer, model, schema, device, userwish)
+        print("\nGenerated SQL Query:\n", generated_sql)
+
+        if is_valid_sql(generated_sql):
+             print("Generated SQL:", generated_sql)
+        else:
+            print("The generated SQL query is invalid.")
+
+        userwish = input("\nEnter another question (or 'exit' to quit): ")
+    
 
     print("end of main")
 
