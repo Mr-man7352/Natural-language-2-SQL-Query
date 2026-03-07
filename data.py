@@ -1,7 +1,9 @@
 import tarfile
 import requests
 import json
-
+from transformers import T5Tokenizer
+from torch.utils.data import Dataset
+import torch
 
 
 def download_and_extract():
@@ -24,7 +26,6 @@ def download_and_extract():
     print("Extracting...")
     with tarfile.open("data.tar.bz2", "r:bz2") as tar:
         tar.extractall()
-
 
 
 def convert_sql(sample, table):
@@ -67,6 +68,59 @@ def build_schema(table):
   for col, typ in zip(table['header'], table['types'])
   ])
 
+def create_training_example():
+    training_pairs=[]
+
+    with open("data/train.jsonl") as f_data, \
+        open("data/train.tables.jsonl") as f_tables:
+
+        tables={}
+
+        for t in f_tables:
+            table_obj= json.loads(t)
+            tables[table_obj['id']]= table_obj
+
+        for line in f_data:
+            sample = json.loads(line)
+            actual_table = tables[sample['table_id']]
+
+            schema= build_schema(actual_table)
+
+            sql = convert_sql(sample, actual_table)
+
+            inp= f"Schema: {schema}, Question: {sample['question']}"
+
+            training_pairs.append((inp,sql))
+
+        training_pairs= training_pairs[:8000]
+    return training_pairs
+
+
+# Converting training pairs into tokenized data
+class SQLDataset(Dataset):
+    def __init__(self, pairs, tokenizer):
+        self.pairs = pairs
+        self.tokenizer = tokenizer
+
+    def __len__(self):
+        return len(self.pairs)
+
+    def __getitem__(self, idx):
+        inp, out = self.pairs[idx]
+        tokens = self.tokenizer(
+            inp,
+            text_target=out,
+            truncation=True,
+            padding="max_length",
+            max_length=256
+        )
+        return {
+            "input_ids": tokens["input_ids"],
+            "attention_mask": tokens["attention_mask"],
+            "labels": tokens["labels"]
+        }
+
+   
 def main():
 
     # Entry point: trigger dataset download and extraction.
@@ -86,7 +140,16 @@ def main():
     sql_query = convert_sql(sample, table)
     print("\nCONVERTED SQL QUERY:\n", sql_query)
 
-    
+    # create training examples
+    training_pairs = create_training_example()
+    print("\nSAMPLE TRAINING EXAMPLE:\n", len(training_pairs), training_pairs[0])
+
+    # Tokenization and encoding for T5
+    tokenizer= T5Tokenizer.from_pretrained("t5-small")
+    tokenized_data= SQLDataset(training_pairs,tokenizer)
+    print("\nSAMPLE TOKENIZED EXAMPLE:\n", tokenized_data[0])
+
+    print("end of main")
 
 
 if __name__ == "__main__":
